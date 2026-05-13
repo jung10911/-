@@ -30,16 +30,17 @@ def get_filtered_market_data(market_code):
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    # 2. 페이지별 크롤링 (액면가 필드 강제 포함)
+    # 2. 페이지별 크롤링
+    # 액면가(face_value), 시가총액(market_sum), 거래량(quant) 데이터를 강제로 포함하도록 URL 구성
     for page in range(1, last_page + 1):
-        url = f"{base_url}&fieldIds=face_value&page={page}"
+        url = f"{base_url}&fieldIds=face_value&fieldIds=market_sum&fieldIds=quant&page={page}"
         res = requests.get(url, headers=headers)
         
-        # [오류 해결] io.StringIO를 사용하여 HTML 문자열을 파일 객체로 변환
+        # HTML 문자열을 파일 객체로 변환하여 판다스 에러 방지
         df_list = pd.read_html(io.StringIO(res.text), encoding='euc-kr')
         df = df_list[1]
         
-        # 데이터 정리: 종목명이 없는 행 및 불필요한 열 제거
+        # 종목명이 없는 행 및 불필요한 열 제거
         df = df.dropna(subset=['종목명'])
         df = df.loc[:, ~df.columns.str.contains('Unnamed')]
         
@@ -52,30 +53,38 @@ def get_filtered_market_data(market_code):
     final_df = pd.concat(all_dfs, ignore_index=True)
     
     # 3. 데이터 전처리 (결측치 및 하이픈을 0으로 변환)
-    # 엑셀 작업 시 오류 방지를 위해 '-' 기호를 0으로 대체합니다.
     final_df = final_df.replace('-', '0').fillna('0')
-    
-    if 'N' in final_df.columns:
-        final_df = final_df.drop(columns=['N'])
 
-    # 4. 필터링 로직 (현재가 < 액면가)
-    # 비교를 위해 숫자형으로 변환 (콤마 제거 포함)
+    # 4. 필터링 로직을 위한 숫자형 변환 (콤마 제거)
     cur_price_num = pd.to_numeric(final_df['현재가'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     face_value_num = pd.to_numeric(final_df['액면가'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    volume_num = pd.to_numeric(final_df['거래량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     
-    # 필터 조건: 액면가가 0보다 크고, 현재가가 액면가보다 낮은 경우
-    mask = (face_value_num > 0) & (cur_price_num < face_value_num)
+    # 5. 핵심 필터 조건
+    # 조건 1: 액면가가 0보다 클 것
+    # 조건 2: 현재가가 액면가보다 작을 것
+    # 조건 3: 거래량이 0보다 클 것 (거래량 0은 제외)
+    mask = (face_value_num > 0) & (cur_price_num < face_value_num) & (volume_num > 0)
+    
     filtered_df = final_df[mask].reset_index(drop=True)
+    
+    # 6. 요청하신 핵심단어(특정 컬럼)만 추출
+    # 기업 식별을 위해 '종목명'은 필수로 포함합니다.
+    target_columns = ['종목명', '현재가', '액면가', '시가총액', '거래량']
+    
+    # 크롤링된 데이터에 해당 컬럼이 있는지 확인 후 추출 (안전장치)
+    available_columns = [col for col in target_columns if col in filtered_df.columns]
+    final_filtered_df = filtered_df[available_columns]
     
     # UI 정리
     status_text.empty()
     progress_bar.empty()
     
-    return filtered_df
+    return final_filtered_df
 
 # 메인 UI
 st.title("📊 주가 < 액면가 종목 리스트")
-st.markdown("네이버 페이 증권 데이터를 기반으로 **현재주가가 액면가보다 낮은** 종목을 추출합니다.")
+st.markdown("네이버 페이 증권 데이터를 기반으로 **현재가, 액면가, 시가총액, 거래량**을 추출합니다.<br>(※ 단, **거래량이 0인 종목은 제외**됩니다.)", unsafe_allow_html=True)
 
 # 사이드바 설정
 market_choice = st.sidebar.selectbox("시장 선택", ["KOSPI", "KOSDAQ"])
@@ -90,7 +99,7 @@ if st.sidebar.button("데이터 분석 시작"):
                 st.subheader(f"✅ {market_choice} 분석 결과 (총 {len(result_df)}개 종목)")
                 st.dataframe(result_df, use_container_width=True)
                 
-                # CSV 다운로드 버튼 (엑셀 한글 깨짐 방지를 위해 utf-8-sig 사용)
+                # CSV 다운로드 버튼
                 csv = result_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
                 st.download_button(
                     label="📥 분석 결과 CSV 다운로드",
@@ -99,7 +108,7 @@ if st.sidebar.button("데이터 분석 시작"):
                     mime='text/csv',
                 )
             else:
-                st.info(f"{market_choice} 시장에 현재 조건에 해당하는 종목이 없습니다.")
+                st.info(f"{market_choice} 시장에 조건을 만족하는 종목이 없습니다.")
                 
     except Exception as e:
         st.error(f"오류가 발생했습니다: {e}")
